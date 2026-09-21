@@ -1,4 +1,4 @@
-var LEVELS = ["Category", "GPO Category", "Description"];
+var LEVELS = ["Category", "GPO Category", "Description", "Parent Company"];
 var MONTHS = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 var N_MONTHS = MONTHS.length; // 9
 var H2_START = 3; // Jul (índice 3 da base de 9 meses), H2 = Jul-Dez
@@ -12,7 +12,12 @@ var ABI = {
 
 var state = { payloadIndex: null, payloadTree: {}, selectedCountries: [], drillPath: [], focusMonth: "Jul", viewMode: "mensal", topN: 999999 };
 var baseLEOverride = null;
-function leName(n) { return n + "+" + (N_MONTHS - n); }
+
+/* LE naming usa meses do calendário (Abr=4, Mai=5, ..., Dez=12).
+   leNum é 1-based (Abr=1, Mai=2, ..., Dez=9).
+   Mês calendário = leNum + 3. Total = 12. */
+function leName(n) { return (n + 3) + "+" + (9 - n); }
+
 var drillTable = null;
 var fmtUSD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 var fmtDays = function(v) { return v.toFixed(1) + "d"; };
@@ -229,10 +234,24 @@ function renderWAPTKPIs(agg) {
 function renderWaterfall(agg) {
   var fi = focusIdx(), leC = leCurrent(), leP = lePrevious();
   var chartMonths, displayDeltas, total;
-  if (isH2()) { chartMonths = MONTHS.slice(H2_START); displayDeltas = []; for (var i = H2_START; i < N_MONTHS; i++) displayDeltas.push(getLEVal(agg, leC, i) - getLEVal(agg, leP, i)); }
-  else { chartMonths = MONTHS.slice(); displayDeltas = []; for (var i = 0; i < N_MONTHS; i++) displayDeltas.push(i < fi ? 0 : (getLEVal(agg, leC, i) - getLEVal(agg, leP, i))); }
+  if (isH2()) {
+    chartMonths = MONTHS.slice(H2_START);
+    displayDeltas = [];
+    for (var i = H2_START; i < N_MONTHS; i++) {
+      displayDeltas.push(getLEVal(agg, leC, i) - getLEVal(agg, leP, i));
+    }
+  } else {
+    chartMonths = MONTHS.slice();
+    displayDeltas = [];
+    for (var i = 0; i < N_MONTHS; i++) {
+      displayDeltas.push(getLEVal(agg, leC, i) - getLEVal(agg, leP, i));
+    }
+  }
   total = displayDeltas.reduce(function(a, b) { return a + b; }, 0);
-  var colors = displayDeltas.map(function(d, i) { var monthIdx = isH2() ? i + H2_START : i; return monthIdx === fi ? ABI.focus : (d >= 0 ? ABI.green : ABI.red); });
+  var colors = displayDeltas.map(function(d, i) {
+    var monthIdx = isH2() ? i + H2_START : i;
+    return monthIdx === fi ? ABI.focus : (d >= 0 ? ABI.green : ABI.red);
+  });
   colors.push(ABI.total);
   var xLabels = chartMonths.concat(["Total"]), yValues = displayDeltas.concat([total]);
   var textLabels = yValues.map(function(v) { return Math.abs(v) < 1 ? "" : fmtUSD.format(v); });
@@ -253,9 +272,23 @@ function renderWaterfall(agg) {
 function renderWAPTWaterfall(agg) {
   var fi = focusIdx(), leC = leCurrent(), leP = lePrevious();
   var chartMonths, displayDeltas;
-  if (isH2()) { chartMonths = MONTHS.slice(H2_START); displayDeltas = []; for (var i = H2_START; i < N_MONTHS; i++) displayDeltas.push(getWAPTVal(agg, leC, i) - getWAPTVal(agg, leP, i)); }
-  else { chartMonths = MONTHS.slice(); displayDeltas = []; for (var i = 0; i < N_MONTHS; i++) displayDeltas.push(i < fi ? 0 : (getWAPTVal(agg, leC, i) - getWAPTVal(agg, leP, i))); }
-  var colors = displayDeltas.map(function(d, i) { var monthIdx = isH2() ? i + H2_START : i; return monthIdx === fi ? ABI.focus : (d >= 0 ? ABI.green : ABI.red); });
+  if (isH2()) {
+    chartMonths = MONTHS.slice(H2_START);
+    displayDeltas = [];
+    for (var i = H2_START; i < N_MONTHS; i++) {
+      displayDeltas.push(getWAPTVal(agg, leC, i) - getWAPTVal(agg, leP, i));
+    }
+  } else {
+    chartMonths = MONTHS.slice();
+    displayDeltas = [];
+    for (var i = 0; i < N_MONTHS; i++) {
+      displayDeltas.push(getWAPTVal(agg, leC, i) - getWAPTVal(agg, leP, i));
+    }
+  }
+  var colors = displayDeltas.map(function(d, i) {
+    var monthIdx = isH2() ? i + H2_START : i;
+    return monthIdx === fi ? ABI.focus : (d >= 0 ? ABI.green : ABI.red);
+  });
   var textLabels = displayDeltas.map(function(v) { return Math.abs(v) < 0.1 ? "" : (v >= 0 ? "+" : "") + fmtDays(v); });
   var wfCard = document.getElementById("waptWaterfall");
   if (wfCard) { var card = wfCard.closest(".card"); if (card) { var span = card.querySelector(".card-header span.text-muted"); if (span) span.textContent = "(Delta WAPT: Actual - LE-1, em dias)"; } }
@@ -348,8 +381,16 @@ function renderDrillTable(nodes, agg) {
   var waptGapFmt = function(c) { var val = c.getValue(); var color = val > 0 ? ABI.green : (val < 0 ? ABI.red : ABI.muted); return '<span style="font-weight:800;color:' + color + ';">' + (val >= 0 ? "+" : "") + fmtDays(val) + '</span>'; };
   var rows, cols;
   if (leaf) {
-    if (isH2()) { rows = []; for (var i = H2_START; i < N_MONTHS; i++) rows.push({ month: MONTHS[i], delta: getLEVal(agg, leC, i) - getLEVal(agg, leP, i) }); }
-    else { rows = MONTHS.map(function(m, i) { return { month: m, delta: i < fi ? 0 : (getLEVal(agg, leC, i) - getLEVal(agg, leP, i)) }; }); }
+    if (isH2()) {
+      rows = [];
+      for (var i = H2_START; i < N_MONTHS; i++) {
+        rows.push({ month: MONTHS[i], delta: getLEVal(agg, leC, i) - getLEVal(agg, leP, i) });
+      }
+    } else {
+      rows = MONTHS.map(function(m, i) {
+        return { month: m, delta: getLEVal(agg, leC, i) - getLEVal(agg, leP, i) };
+      });
+    }
     cols = [{ title: "Forecast Month", field: "month" }, { title: "Delta", field: "delta", formatter: deltaMoney, hozAlign: "right" }];
   } else {
     rows = mergeChildren(nodes).map(function(d) {
