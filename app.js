@@ -1,7 +1,12 @@
+var CAL_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 var LEVELS = ["Category", "GPO Category", "Description", "Parent Company"];
+
+/* Preenchidos no carregamento a partir do payload */
+var FIRST_LE = 1;      // primeiro LE com dados (ex.: 4 = Abril)
+var ROW_OFFSET = 0;    // linha do payload onde o FIRST_LE começa
 var MONTHS = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-var N_MONTHS = MONTHS.length; // 9
-var H2_START = 3; // Jul (índice 3 da base de 9 meses), H2 = Jul-Dez
+var N_MONTHS = MONTHS.length;
+var H2_START = 3;
 
 /* Paleta: dourado nos destaques, verde/vermelho vivos */
 var ABI = {
@@ -13,10 +18,8 @@ var ABI = {
 var state = { payloadIndex: null, payloadTree: {}, selectedCountries: [], drillPath: [], focusMonth: "Jul", viewMode: "mensal", topN: 999999 };
 var baseLEOverride = null;
 
-/* LE naming usa meses do calendário (Abr=4, Mai=5, ..., Dez=12).
-   leNum é 1-based (Abr=1, Mai=2, ..., Dez=9).
-   Mês calendário = leNum + 3. Total = 12. */
-function leName(n) { return (n + 3) + "+" + (9 - n); }
+/* LE naming pelo mês do calendário: LE7 = 7+5 (Julho), LE5 = 5+7 (Maio) */
+function leName(n) { return n + "+" + (12 - n); }
 
 var drillTable = null;
 var fmtUSD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -36,19 +39,86 @@ function showStatus(msg, isError) {
 function clearStatus() { var b = document.getElementById("statusBanner"); if (b) b.remove(); }
 
 function focusIdx() { return MONTHS.indexOf(state.focusMonth); }
-function leCurrent() { return focusIdx() + 1; }
-function lePrevious() { if (baseLEOverride !== null) return baseLEOverride; return focusIdx(); }
+function leCurrent() { return FIRST_LE + focusIdx(); }
+function lePrevious() { if (baseLEOverride !== null) return baseLEOverride; return FIRST_LE + focusIdx() - 1; }
 function isH2() { return state.viewMode === "h2"; }
 function periodLabel() { return isH2() ? "H2" : state.focusMonth; }
-function maxLE() {
-  var list = state.payloadIndex && state.payloadIndex.le_list, m = N_MONTHS;
-  if (list) { for (var i = 0; i < list.length; i++) { if (list[i] > m) m = list[i]; } }
-  return m;
+function maxLE() { return FIRST_LE + N_MONTHS - 1; }
+function rowForLE(leNum) { return ROW_OFFSET + (leNum - FIRST_LE); }
+
+/* Detecta a estrutura real do payload: primeiro LE com dados e quantos
+   meses existem. Funciona com payload que mantem linhas vazias dos LEs
+   removidos e com payload regenerado sem as linhas vazias. */
+function setupMonths() {
+  var keys = Object.keys(state.payloadTree);
+  var totalRows = 0, firstRow = -1;
+  for (var k = 0; k < keys.length; k++) {
+    var n = state.payloadTree[keys[k]];
+    if (n && Array.isArray(n.lm) && n.lm.length) {
+      totalRows = n.lm.length;
+      for (var r = 0; r < n.lm.length; r++) {
+        var row = n.lm[r];
+        if (row && row.some(function(v) { return !!v; })) { firstRow = r; break; }
+      }
+      break;
+    }
+  }
+  if (!totalRows) totalRows = 9;
+  if (firstRow < 0) firstRow = 0;
+
+  var leList = state.payloadIndex && state.payloadIndex.le_list;
+  var firstLE, avail;
+  if (leList && leList.length && leList[0] > 1) {
+    firstLE = leList[0];
+    avail = leList.length;
+  } else {
+    firstLE = firstRow + 1;
+    avail = totalRows - firstRow;
+  }
+  avail = Math.max(1, Math.min(avail, 12 - firstLE + 1));
+
+  FIRST_LE = firstLE;
+  ROW_OFFSET = firstRow;
+  MONTHS = [];
+  for (var m = 0; m < avail; m++) MONTHS.push(CAL_MONTHS[firstLE - 1 + m]);
+  N_MONTHS = MONTHS.length;
+  H2_START = Math.max(0, Math.min(N_MONTHS - 1, 7 - firstLE));
+  if (MONTHS.indexOf(state.focusMonth) < 0) state.focusMonth = MONTHS[Math.min(3, N_MONTHS - 1)];
+}
+
+/* Normaliza as colunas no carregamento: mantem as ultimas 9 colunas
+   (Abr a Dez), para funcionar com payload de 12 ou 9 meses. As linhas
+   sao preservadas para a deteccao do primeiro LE continuar valida. */
+function normalizeNode(node) {
+  if (!node) return null;
+  var out = {};
+  if (Array.isArray(node.lm)) {
+    out.lm = node.lm.map(function(r) {
+      return Array.isArray(r) ? r.slice(-9) : r;
+    });
+  }
+  if (Array.isArray(node.rw)) {
+    out.rw = node.rw.map(function(r) {
+      return Array.isArray(r) ? r.slice(-9) : r;
+    });
+  }
+  if (Array.isArray(node.rm)) {
+    out.rm = node.rm.slice();
+  }
+  if (node.children) {
+    var ch = {};
+    Object.keys(node.children).forEach(function(k) {
+      var c = normalizeNode(node.children[k]);
+      if (c) ch[k] = c;
+    });
+    if (Object.keys(ch).length) out.children = ch;
+  }
+  return out;
 }
 
 function getLEVal(node, leNum, monthIdx) {
   if (!node || !node.lm) return 0;
-  var idx = leNum - 1;
+  var idx = rowForLE(leNum);
   if (idx < 0 || idx >= node.lm.length) return 0;
   var row = node.lm[idx];
   if (!row) return 0;
@@ -56,13 +126,13 @@ function getLEVal(node, leNum, monthIdx) {
 }
 function getRolling(node, leNum) {
   if (!node || !node.rm) return 0;
-  var idx = leNum - 1;
+  var idx = rowForLE(leNum);
   if (idx < 0 || idx >= node.rm.length) return 0;
   return node.rm[idx] || 0;
 }
 function getWAPTVal(node, leNum, monthIdx) {
   if (!node || !node.rw || !node.rm) return 0;
-  var idx = leNum - 1;
+  var idx = rowForLE(leNum);
   if (idx < 0 || idx >= node.rw.length) return 0;
   var row = node.rw[idx];
   if (!row) return 0;
@@ -171,10 +241,10 @@ function populateBaseLE() {
   var sel = document.getElementById("baseLESelect");
   if (!sel || !state.payloadIndex) return;
   var cur = leCurrent(), nLE = maxLE();
-  if (baseLEOverride !== null && (baseLEOverride < 1 || baseLEOverride > nLE)) baseLEOverride = null;
+  if (baseLEOverride !== null && (baseLEOverride < FIRST_LE || baseLEOverride > nLE)) baseLEOverride = null;
   if (baseLEOverride !== null && baseLEOverride === cur) baseLEOverride = null;
   var html = '<option value="">LE anterior (padrão)</option>';
-  for (var i = 1; i <= nLE; i++) { if (i === cur) continue; html += '<option value="' + i + '">LE ' + leName(i) + '</option>'; }
+  for (var i = FIRST_LE; i <= nLE; i++) { if (i === cur) continue; html += '<option value="' + i + '">LE ' + leName(i) + '</option>'; }
   sel.innerHTML = html;
   sel.value = baseLEOverride === null ? "" : String(baseLEOverride);
 }
@@ -231,6 +301,7 @@ function renderWAPTKPIs(agg) {
   e = document.getElementById("waptGapSub"); if (e) e.textContent = labels.waptGapSub;
 }
 
+/* Waterfall: delta = LE atual - LE anterior, para todos os meses */
 function renderWaterfall(agg) {
   var fi = focusIdx(), leC = leCurrent(), leP = lePrevious();
   var chartMonths, displayDeltas, total;
@@ -475,7 +546,11 @@ async function loadData() {
     if (!cs || !cs.length) throw new Error("payload_index.json vazio. Rode: py build_payload_web.py");
     var urls = cs.map(function(c) { return "payloads/" + c.slug + ".json"; });
     var results = await Promise.all(urls.map(function(u) { return fetch(u).then(function(r) { if (!r.ok) throw new Error(u + " HTTP " + r.status); return r.json(); }); }));
-    for (var i = 0; i < cs.length; i++) { var p = results[i]; if (p && p.node) state.payloadTree[cs[i].slug] = p.node; }
+    for (var i = 0; i < cs.length; i++) {
+      var p = results[i];
+      if (p && p.node) state.payloadTree[cs[i].slug] = normalizeNode(p.node);
+    }
+    setupMonths();
     clearStatus(); init();
   } catch (e) {
     console.error(e);
